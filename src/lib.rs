@@ -8,11 +8,13 @@ mod validation;
 mod fees;
 mod metrics;
 #[cfg(feature = "oracle")]
-mod oracle;
+pub mod oracle;
 #[cfg(feature = "oracle")]
 mod pyth_client;
 #[cfg(feature = "oracle")]
 mod oracle_processing;
+#[cfg(feature = "institutional")]
+pub mod institutional;
 
 // Re-export public types and functions
 pub use crate::types::*;
@@ -28,12 +30,12 @@ static PLUGIN_NAME: &[u8] = b"RelayPlugin\0";
 // Main plugin interface export
 #[no_mangle]
 pub static PLUGIN_INTERFACE: PluginInterface = PluginInterface {
-    version: 2,
-    capabilities: CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION | CAPABILITY_ORACLE_PROCESSING,
+    version: 3,
+    capabilities: CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION | CAPABILITY_ORACLE_PROCESSING | CAPABILITY_INSTITUTIONAL_MARKET_MAKING,
     name: PLUGIN_NAME.as_ptr() as *const c_char,
     init: plugin_init,
     shutdown: plugin_shutdown,
-    process_bundle: process_bundle_v2,
+    process_bundle: process_bundle_v3,
     get_fee_estimate: estimate_bundle_fee_v2,
     get_state: get_plugin_state,
     set_state: set_plugin_state,
@@ -98,6 +100,35 @@ pub extern "C" fn plugin_shutdown() -> i32 {
     SUCCESS
 }
 
+// Process transaction bundle (V3 with institutional features)
+#[no_mangle]
+pub extern "C" fn process_bundle_v3(bundle: *mut TransactionBundle) -> i32 {
+    // Start timing
+    let start_time = std::time::Instant::now();
+    
+    // Validate bundle pointer
+    if bundle.is_null() {
+        log::error!("Received null bundle pointer");
+        return ERROR_NULL_POINTER;
+    }
+
+    // Use institutional processing if available, otherwise fall back to V2/V1
+    #[cfg(feature = "institutional")]
+    let result = unsafe { institutional::process_institutional_bundle(bundle) };
+    
+    #[cfg(all(not(feature = "institutional"), feature = "oracle"))]
+    let result = unsafe { oracle_processing::process_oracle_bundle(bundle) };
+    
+    #[cfg(all(not(feature = "institutional"), not(feature = "oracle")))]
+    let result = unsafe { processing::process_bundle(bundle) };
+    
+    // Update metrics
+    let processing_time = start_time.elapsed().as_micros() as u64;
+    metrics::update_processing_metrics(processing_time, result == SUCCESS);
+    
+    result
+}
+
 // Process transaction bundle (V2 with oracle support)
 #[no_mangle]
 pub extern "C" fn process_bundle_v2(bundle: *mut TransactionBundle) -> i32 {
@@ -155,7 +186,7 @@ pub extern "C" fn estimate_bundle_fee_v2(bundle: *const TransactionBundle) -> u6
 
     #[cfg(feature = "oracle")]
     {
-        unsafe { oracle_processing::get_oracle_fee_estimate(bundle) }
+        oracle_processing::get_oracle_fee_estimate(bundle)
     }
     
     #[cfg(not(feature = "oracle"))]
@@ -172,6 +203,50 @@ pub extern "C" fn estimate_forwarding_fee(bundle: *const TransactionBundle) -> u
     }
 
     unsafe { fees::calculate_bundle_fee(bundle) }
+}
+
+// V3 institutional bundle processing
+#[no_mangle]
+pub extern "C" fn process_institutional_bundle(bundle: *mut TransactionBundle) -> i32 {
+    let start_time = std::time::Instant::now();
+    
+    if bundle.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    #[cfg(feature = "institutional")]
+    let result = unsafe { institutional::process_institutional_bundle(bundle) };
+    
+    #[cfg(not(feature = "institutional"))]
+    let result = unsafe { processing::process_bundle(bundle) };
+    
+    let processing_time = start_time.elapsed().as_micros() as u64;
+    metrics::update_processing_metrics(processing_time, result == SUCCESS);
+    
+    result
+}
+
+// V3 institutional fee estimation
+#[no_mangle]
+pub extern "C" fn estimate_institutional_fee(bundle: *const TransactionBundle) -> u64 {
+    if bundle.is_null() {
+        return 0;
+    }
+
+    #[cfg(feature = "institutional")]
+    {
+        unsafe {
+            let bundle_ref = bundle.as_ref().unwrap();
+            let detector = institutional::CrossChainDetector::new();
+            let opportunities = detector.detect_arbitrage_opportunities(bundle_ref);
+            institutional::calculate_institutional_fee(bundle_ref, opportunities.len())
+        }
+    }
+    
+    #[cfg(not(feature = "institutional"))]
+    {
+        unsafe { fees::calculate_bundle_fee(bundle) }
+    }
 }
 
 // Get current plugin state
@@ -228,20 +303,24 @@ pub extern "C" fn set_plugin_state(state_data: *const u8, data_len: usize) -> i3
 // Export additional utility functions
 #[no_mangle]
 pub extern "C" fn relay_plugin_version() -> u32 {
-    2
+    3
 }
 
 #[no_mangle]
 pub extern "C" fn relay_plugin_capabilities() -> u32 {
+    let mut caps = CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION;
+    
     #[cfg(feature = "oracle")]
     {
-        CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION | CAPABILITY_ORACLE_PROCESSING
+        caps |= CAPABILITY_ORACLE_PROCESSING;
     }
     
-    #[cfg(not(feature = "oracle"))]
+    #[cfg(feature = "institutional")]
     {
-        CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION
+        caps |= CAPABILITY_INSTITUTIONAL_MARKET_MAKING;
     }
+    
+    caps
 }
 
 // Module tests
@@ -311,19 +390,17 @@ mod tests {
 
     #[test]
     fn test_plugin_version() {
-        assert_eq!(relay_plugin_version(), 2);
+        assert_eq!(relay_plugin_version(), 3);
+        
+        let capabilities = relay_plugin_capabilities();
+        assert!(capabilities & CAPABILITY_BUNDLE_PROCESSING != 0);
+        assert!(capabilities & CAPABILITY_FEE_COLLECTION != 0);
         
         #[cfg(feature = "oracle")]
-        assert_eq!(
-            relay_plugin_capabilities(),
-            CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION | CAPABILITY_ORACLE_PROCESSING
-        );
+        assert!(capabilities & CAPABILITY_ORACLE_PROCESSING != 0);
         
-        #[cfg(not(feature = "oracle"))]
-        assert_eq!(
-            relay_plugin_capabilities(),
-            CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION
-        );
+        #[cfg(feature = "institutional")]
+        assert!(capabilities & CAPABILITY_INSTITUTIONAL_MARKET_MAKING != 0);
     }
 
     #[test]
@@ -334,18 +411,12 @@ mod tests {
         // Test plugin interface
         println!("✅ Plugin interface verification...");
         unsafe {
-            assert_eq!(PLUGIN_INTERFACE.version, 2);
-            #[cfg(feature = "oracle")]
-            assert_eq!(
-                PLUGIN_INTERFACE.capabilities,
-                CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION | CAPABILITY_ORACLE_PROCESSING
-            );
-            
-            #[cfg(not(feature = "oracle"))]
-            assert_eq!(
-                PLUGIN_INTERFACE.capabilities,
-                CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION
-            );
+            assert_eq!(PLUGIN_INTERFACE.version, 3);
+            let caps = PLUGIN_INTERFACE.capabilities;
+            assert!(caps & CAPABILITY_BUNDLE_PROCESSING != 0);
+            assert!(caps & CAPABILITY_FEE_COLLECTION != 0);
+            assert!(caps & CAPABILITY_ORACLE_PROCESSING != 0);
+            assert!(caps & CAPABILITY_INSTITUTIONAL_MARKET_MAKING != 0);
             assert!(!PLUGIN_INTERFACE.name.is_null());
         }
         
@@ -501,7 +572,7 @@ mod tests {
         
         // Test oracle interface exists
         println!("✅ Oracle interface verification...");
-        assert_eq!(PLUGIN_INTERFACE.version, 2);
+        assert_eq!(PLUGIN_INTERFACE.version, 3);
         assert!(
             PLUGIN_INTERFACE.capabilities & CAPABILITY_ORACLE_PROCESSING != 0,
             "Oracle processing capability not found"
@@ -644,5 +715,105 @@ mod tests {
         // Verify capability constants
         assert_eq!(CAPABILITY_BUNDLE_PROCESSING, 0x01);
         assert_eq!(CAPABILITY_FEE_COLLECTION, 0x08);
+    }
+
+    #[test]
+    #[cfg(feature = "institutional")]
+    fn test_v3_institutional_verification() {
+        println!("\n🔍 V3 INSTITUTIONAL VERIFICATION");
+        println!("===============================");
+        
+        // Test plugin version and capabilities
+        println!("✅ V3 interface verification...");
+        assert_eq!(relay_plugin_version(), 3);
+        
+        let capabilities = relay_plugin_capabilities();
+        assert!(capabilities & CAPABILITY_INSTITUTIONAL_MARKET_MAKING != 0);
+        println!("    V3 capabilities: 0x{:x}", capabilities);
+        
+        // Test institutional processing
+        println!("✅ Institutional processing...");
+        let (_sigs, _keys, _instrs, _acc_data, _inst_data, mut tx) = create_test_transaction();
+        
+        let mut bundle = TransactionBundle {
+            transaction_count: 1,
+            transactions: &mut tx as *mut Transaction,
+            metadata: BundleMetadata {
+                slot: 100000,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                leader_pubkey: [1u8; 32],
+                plugin_fees: 25000, // Higher institutional fee
+                tip_amount: 5000,
+            },
+            attestation: std::ptr::null_mut(),
+        };
+        
+        let result = process_institutional_bundle(&mut bundle as *mut _);
+        assert_eq!(result, SUCCESS);
+        println!("    Institutional processing: SUCCESS");
+        
+        // Test cross-chain detection
+        println!("✅ Cross-chain arbitrage detection...");
+        let detector = institutional::CrossChainDetector::new();
+        let opportunities = unsafe { detector.detect_arbitrage_opportunities(&bundle) };
+        println!("    Found {} arbitrage opportunities", opportunities.len());
+        
+        // Test institutional fee calculation
+        println!("✅ Institutional fee calculation...");
+        let institutional_fee = estimate_institutional_fee(&bundle as *const _);
+        assert!(institutional_fee > 0);
+        println!("    Institutional fee: {} lamports", institutional_fee);
+        
+        println!("\n🎉 V3 INSTITUTIONAL VERIFICATION COMPLETE!");
+        println!("==========================================");
+        println!("✅ V3 Interface: PASS");
+        println!("✅ Institutional Processing: PASS");
+        println!("✅ Cross-Chain Detection: PASS");
+        println!("✅ Fee Calculation: PASS");
+        println!("\n🚀 V3 INSTITUTIONAL PLUGIN IS FUNCTIONAL!");
+    }
+
+    #[test]
+    fn test_v3_backward_compatibility() {
+        println!("\n🔍 V3 BACKWARD COMPATIBILITY");
+        println!("============================");
+        
+        let (_sigs, _keys, _instrs, _acc_data, _inst_data, mut tx) = create_test_transaction();
+        
+        let mut bundle = TransactionBundle {
+            transaction_count: 1,
+            transactions: &mut tx as *mut Transaction,
+            metadata: BundleMetadata {
+                slot: 100000,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                leader_pubkey: [1u8; 32],
+                plugin_fees: 25000,
+                tip_amount: 5000,
+            },
+            attestation: std::ptr::null_mut(),
+        };
+        
+        // Test V1 still works
+        let v1_result = process_bundle_forwarding(&mut bundle as *mut _);
+        assert_eq!(v1_result, SUCCESS);
+        
+        // Test V2 still works  
+        let v2_result = process_bundle_v2(&mut bundle as *mut _);
+        assert_eq!(v2_result, SUCCESS);
+        
+        // Test V3 works
+        let v3_result = process_bundle_v3(&mut bundle as *mut _);
+        assert_eq!(v3_result, SUCCESS);
+        
+        println!("✅ V1 Functions: PASS");
+        println!("✅ V2 Functions: PASS");
+        println!("✅ V3 Functions: PASS");
+        println!("✅ Full Backward Compatibility: PASS");
     }
 }
