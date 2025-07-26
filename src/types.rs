@@ -112,6 +112,7 @@ pub const CAPABILITY_TRANSACTION_INJECTION: u32 = 0x02;
 pub const CAPABILITY_PRIORITY_ORDERING: u32 = 0x04;
 pub const CAPABILITY_FEE_COLLECTION: u32 = 0x08;
 pub const CAPABILITY_ORACLE_PROCESSING: u32 = 0x10;
+pub const CAPABILITY_INSTITUTIONAL_MARKET_MAKING: u32 = 0x20;
 
 // Error codes
 pub const SUCCESS: i32 = 0;
@@ -128,6 +129,45 @@ pub const ERROR_ORACLE_INVALID_ACCOUNT: i32 = -101;
 pub const ERROR_ORACLE_NETWORK_FAILURE: i32 = -102;
 pub const ERROR_ORACLE_PARSE_FAILURE: i32 = -103;
 pub const ERROR_ORACLE_CACHE_MISS: i32 = -104;
+
+// V3 Institutional error codes  
+pub const ERROR_INSTITUTIONAL_RISK_LIMIT: i32 = -200;
+pub const ERROR_INSTITUTIONAL_COMPLIANCE: i32 = -201;
+pub const ERROR_INSTITUTIONAL_JURISDICTION: i32 = -202;
+
+// V3 Institutional structures
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct InstitutionalConfig {
+    pub institution_id: [u8; 32],
+    pub risk_limits: RiskParameters,
+    pub compliance_requirements: ComplianceFlags,
+    pub cross_chain_enabled: bool,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct RiskParameters {
+    pub max_position_size: u64,
+    pub max_daily_volume: u64,
+    pub var_limit: u32, // basis points
+}
+
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct ComplianceFlags {
+    pub kyc_required: bool,
+    pub aml_screening: bool,
+    pub jurisdiction_restrictions: u32, // bitfield
+}
+
+#[derive(Debug, Clone)]
+pub struct ArbitrageOpportunity {
+    pub source_chain: u32,
+    pub dest_chain: u32,
+    pub token_amount: u64,
+    pub expected_profit: u64,
+}
 
 // Internal state for metrics and configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
