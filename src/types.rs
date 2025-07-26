@@ -111,6 +111,7 @@ pub const CAPABILITY_BUNDLE_PROCESSING: u32 = 0x01;
 pub const CAPABILITY_TRANSACTION_INJECTION: u32 = 0x02;
 pub const CAPABILITY_PRIORITY_ORDERING: u32 = 0x04;
 pub const CAPABILITY_FEE_COLLECTION: u32 = 0x08;
+pub const CAPABILITY_ORACLE_PROCESSING: u32 = 0x10;
 
 // Error codes
 pub const SUCCESS: i32 = 0;
@@ -120,6 +121,13 @@ pub const ERROR_PROCESSING_FAILED: i32 = -3;
 pub const ERROR_INSUFFICIENT_FEE: i32 = -4;
 pub const ERROR_INVALID_STATE: i32 = -5;
 pub const ERROR_ALLOCATION_FAILED: i32 = -6;
+
+// Oracle error codes (V2) - unified namespace
+pub const ERROR_ORACLE_STALE_PRICE: i32 = -100;
+pub const ERROR_ORACLE_INVALID_ACCOUNT: i32 = -101;
+pub const ERROR_ORACLE_NETWORK_FAILURE: i32 = -102;
+pub const ERROR_ORACLE_PARSE_FAILURE: i32 = -103;
+pub const ERROR_ORACLE_CACHE_MISS: i32 = -104;
 
 // Internal state for metrics and configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
