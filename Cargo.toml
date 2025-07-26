@@ -1,14 +1,14 @@
 [package]
 name = "relay-bam-plugin"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Relay BAM Plugin Team"]
-description = "A V2 Oracle Plugin for Solana's Block Assembly Marketplace (BAM) with just-in-time price injection"
+description = "Simulated BAM plugin development framework: design, test and benchmark Solana block-building plugins without live network access."
 license = "MIT"
 
 [lib]
 name = "relay_bam_plugin"
-crate-type = ["cdylib"]  # Creates .so file for dynamic loading
+crate-type = ["cdylib", "rlib"]  # Creates .so file for dynamic loading and allows Rust tests
 
 [dependencies]
 libc = "0.2"
@@ -26,8 +26,9 @@ hex = "0.4"
 base64 = "0.21"
 
 [features]
-default = ["oracle"]
+default = ["oracle", "institutional"]
 oracle = []
+institutional = []
 
 [dev-dependencies]
 criterion = "0.5"
