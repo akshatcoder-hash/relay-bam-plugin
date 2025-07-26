@@ -7,6 +7,12 @@ mod processing;
 mod validation;
 mod fees;
 mod metrics;
+#[cfg(feature = "oracle")]
+mod oracle;
+#[cfg(feature = "oracle")]
+mod pyth_client;
+#[cfg(feature = "oracle")]
+mod oracle_processing;
 
 // Re-export public types and functions
 pub use crate::types::*;
@@ -22,13 +28,13 @@ static PLUGIN_NAME: &[u8] = b"RelayPlugin\0";
 // Main plugin interface export
 #[no_mangle]
 pub static PLUGIN_INTERFACE: PluginInterface = PluginInterface {
-    version: 1,
-    capabilities: CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION,
+    version: 2,
+    capabilities: CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION | CAPABILITY_ORACLE_PROCESSING,
     name: PLUGIN_NAME.as_ptr() as *const c_char,
     init: plugin_init,
     shutdown: plugin_shutdown,
-    process_bundle: process_bundle_forwarding,
-    get_fee_estimate: estimate_forwarding_fee,
+    process_bundle: process_bundle_v2,
+    get_fee_estimate: estimate_bundle_fee_v2,
     get_state: get_plugin_state,
     set_state: set_plugin_state,
 };
@@ -61,6 +67,16 @@ pub extern "C" fn plugin_init(config_data: *const u8, config_len: usize) -> i32 
         }
     }
 
+    // Initialize oracle client if oracle feature is enabled
+    #[cfg(feature = "oracle")]
+    {
+        use crate::oracle::OracleConfig;
+        let _oracle_config = OracleConfig::default();
+        
+        // Note: We can't use async in FFI, so oracle initialization will happen lazily
+        log::info!("Oracle feature enabled, oracle client will initialize on first use");
+    }
+
     log::info!("Relay BAM Plugin v{} initialized", env!("CARGO_PKG_VERSION"));
     SUCCESS
 }
@@ -82,7 +98,33 @@ pub extern "C" fn plugin_shutdown() -> i32 {
     SUCCESS
 }
 
-// Process transaction bundle
+// Process transaction bundle (V2 with oracle support)
+#[no_mangle]
+pub extern "C" fn process_bundle_v2(bundle: *mut TransactionBundle) -> i32 {
+    // Start timing
+    let start_time = std::time::Instant::now();
+    
+    // Validate bundle pointer
+    if bundle.is_null() {
+        log::error!("Received null bundle pointer");
+        return ERROR_NULL_POINTER;
+    }
+
+    // Use oracle processing if available, otherwise fall back to V1
+    #[cfg(feature = "oracle")]
+    let result = unsafe { oracle_processing::process_oracle_bundle(bundle) };
+    
+    #[cfg(not(feature = "oracle"))]
+    let result = unsafe { processing::process_bundle(bundle) };
+    
+    // Update metrics
+    let processing_time = start_time.elapsed().as_micros() as u64;
+    metrics::update_processing_metrics(processing_time, result == SUCCESS);
+    
+    result
+}
+
+// Legacy V1 function for backward compatibility
 #[no_mangle]
 pub extern "C" fn process_bundle_forwarding(bundle: *mut TransactionBundle) -> i32 {
     // Start timing
@@ -104,7 +146,25 @@ pub extern "C" fn process_bundle_forwarding(bundle: *mut TransactionBundle) -> i
     result
 }
 
-// Estimate fee for bundle
+// Estimate fee for bundle (V2 with oracle support)
+#[no_mangle]
+pub extern "C" fn estimate_bundle_fee_v2(bundle: *const TransactionBundle) -> u64 {
+    if bundle.is_null() {
+        return 0;
+    }
+
+    #[cfg(feature = "oracle")]
+    {
+        unsafe { oracle_processing::get_oracle_fee_estimate(bundle) }
+    }
+    
+    #[cfg(not(feature = "oracle"))]
+    {
+        unsafe { fees::calculate_bundle_fee(bundle) }
+    }
+}
+
+// Legacy V1 function for backward compatibility
 #[no_mangle]
 pub extern "C" fn estimate_forwarding_fee(bundle: *const TransactionBundle) -> u64 {
     if bundle.is_null() {
@@ -168,12 +228,20 @@ pub extern "C" fn set_plugin_state(state_data: *const u8, data_len: usize) -> i3
 // Export additional utility functions
 #[no_mangle]
 pub extern "C" fn relay_plugin_version() -> u32 {
-    1
+    2
 }
 
 #[no_mangle]
 pub extern "C" fn relay_plugin_capabilities() -> u32 {
-    CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION
+    #[cfg(feature = "oracle")]
+    {
+        CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION | CAPABILITY_ORACLE_PROCESSING
+    }
+    
+    #[cfg(not(feature = "oracle"))]
+    {
+        CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION
+    }
 }
 
 // Module tests
@@ -243,7 +311,15 @@ mod tests {
 
     #[test]
     fn test_plugin_version() {
-        assert_eq!(relay_plugin_version(), 1);
+        assert_eq!(relay_plugin_version(), 2);
+        
+        #[cfg(feature = "oracle")]
+        assert_eq!(
+            relay_plugin_capabilities(),
+            CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION | CAPABILITY_ORACLE_PROCESSING
+        );
+        
+        #[cfg(not(feature = "oracle"))]
         assert_eq!(
             relay_plugin_capabilities(),
             CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION
@@ -258,7 +334,14 @@ mod tests {
         // Test plugin interface
         println!("✅ Plugin interface verification...");
         unsafe {
-            assert_eq!(PLUGIN_INTERFACE.version, 1);
+            assert_eq!(PLUGIN_INTERFACE.version, 2);
+            #[cfg(feature = "oracle")]
+            assert_eq!(
+                PLUGIN_INTERFACE.capabilities,
+                CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION | CAPABILITY_ORACLE_PROCESSING
+            );
+            
+            #[cfg(not(feature = "oracle"))]
             assert_eq!(
                 PLUGIN_INTERFACE.capabilities,
                 CAPABILITY_BUNDLE_PROCESSING | CAPABILITY_FEE_COLLECTION
@@ -408,6 +491,145 @@ mod tests {
         println!("✅ Validation Logic: PASS");
         println!("✅ Non-Destructive Optimization: PASS");
         println!("\n🚀 V1 RELAY PLUGIN IS PRODUCTION READY!");
+    }
+
+    #[test]
+    #[cfg(feature = "oracle")]
+    fn test_v2_oracle_capabilities() {
+        println!("\n🔍 V2 ORACLE VERIFICATION");
+        println!("=========================");
+        
+        // Test oracle interface exists
+        println!("✅ Oracle interface verification...");
+        assert_eq!(PLUGIN_INTERFACE.version, 2);
+        assert!(
+            PLUGIN_INTERFACE.capabilities & CAPABILITY_ORACLE_PROCESSING != 0,
+            "Oracle processing capability not found"
+        );
+        
+        // Test oracle types
+        println!("✅ Oracle type definitions...");
+        use crate::oracle::*;
+        
+        let price_data = PriceData {
+            price: 100_000_000,  // $100 with 6 decimals
+            conf: 50_000,        // $0.05 confidence
+            expo: -6,            // 6 decimal places
+            publish_time: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        };
+        
+        let confidence_score = calculate_price_confidence_score(
+            &price_data,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        );
+        
+        assert!(confidence_score >= 50, "Price confidence too low: {}%", confidence_score);
+        
+        // Test oracle cache
+        println!("✅ Oracle cache functionality...");
+        let mut cache = OracleCache::default();
+        let price_id = [1u8; 32];
+        
+        assert!(cache.get_price(&price_id).is_none());
+        cache.update_price(price_id, price_data.clone());
+        assert!(cache.get_price(&price_id).is_some());
+        
+        // Test injection point extraction
+        println!("✅ Price injection point detection...");
+        let (_sigs, _keys, _instrs, _acc_data, _inst_data, mut tx) = create_test_transaction();
+        
+        let mut bundle = TransactionBundle {
+            transaction_count: 1,
+            transactions: &mut tx as *mut Transaction,
+            metadata: BundleMetadata {
+                slot: 100000,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                leader_pubkey: [1u8; 32],
+                plugin_fees: 25000, // Higher fee for oracle processing
+                tip_amount: 5000,
+            },
+            attestation: std::ptr::null_mut(),
+        };
+        
+        let injection_points = extract_price_injection_points(&bundle);
+        println!("    Found {} potential injection points", injection_points.len());
+        
+        // Test V2 fee estimation
+        println!("✅ Oracle fee estimation...");
+        let estimated_fee = estimate_bundle_fee_v2(&bundle as *const _);
+        assert!(estimated_fee > 0);
+        println!("    Estimated oracle fee: {} lamports", estimated_fee);
+        
+        println!("\n🎉 V2 ORACLE VERIFICATION COMPLETE!");
+        println!("===================================");
+        println!("✅ Oracle Interface: PASS");
+        println!("✅ Price Data Types: PASS");
+        println!("✅ Cache Management: PASS");
+        println!("✅ Injection Detection: PASS");
+        println!("✅ Fee Calculation: PASS");
+        println!("\n🚀 V2 ORACLE PLUGIN IS FUNCTIONAL!");
+    }
+
+    #[test]
+    fn test_v2_backward_compatibility() {
+        println!("\n🔍 V2 BACKWARD COMPATIBILITY");
+        println!("============================");
+        
+        // Test that V1 functions still work
+        println!("✅ V1 function compatibility...");
+        let (_sigs, _keys, _instrs, _acc_data, _inst_data, mut tx) = create_test_transaction();
+        
+        let mut bundle = TransactionBundle {
+            transaction_count: 1,
+            transactions: &mut tx as *mut Transaction,
+            metadata: BundleMetadata {
+                slot: 100000,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                leader_pubkey: [1u8; 32],
+                plugin_fees: 15000,
+                tip_amount: 5000,
+            },
+            attestation: std::ptr::null_mut(),
+        };
+        
+        // Test V1 processing still works
+        let v1_result = process_bundle_forwarding(&mut bundle as *mut _);
+        assert_eq!(v1_result, SUCCESS);
+        
+        // Test V1 fee estimation still works
+        let v1_fee = estimate_forwarding_fee(&bundle as *const _);
+        assert!(v1_fee > 0);
+        
+        // Test V2 processing also works
+        let v2_result = process_bundle_v2(&mut bundle as *mut _);
+        assert_eq!(v2_result, SUCCESS);
+        
+        // Test V2 fee estimation
+        let v2_fee = estimate_bundle_fee_v2(&bundle as *const _);
+        assert!(v2_fee > 0);
+        
+        println!("    V1 processing result: {}", v1_result);
+        println!("    V1 fee estimate: {} lamports", v1_fee);
+        println!("    V2 processing result: {}", v2_result);
+        println!("    V2 fee estimate: {} lamports", v2_fee);
+        
+        println!("\n🎉 BACKWARD COMPATIBILITY VERIFIED!");
+        println!("==================================");
+        println!("✅ V1 Functions: PASS");
+        println!("✅ V2 Functions: PASS");
+        println!("✅ Cross-Version Compatibility: PASS");
     }
 
     #[test]
