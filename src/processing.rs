@@ -2,6 +2,7 @@ use crate::types::*;
 use crate::validation;
 use crate::fees;
 use crate::PLUGIN_STATE;
+use std::collections::HashMap;
 
 pub unsafe fn process_bundle(bundle: *mut TransactionBundle) -> i32 {
     // Dereference bundle safely
@@ -106,7 +107,7 @@ unsafe fn apply_bundle_optimizations(bundle: &TransactionBundle) -> i32 {
 
 unsafe fn analyze_optimization_opportunities(transactions: &[Transaction]) {
     // Check for duplicate priority fees (could be batched)
-    let mut fee_counts = std::collections::HashMap::new();
+    let mut fee_counts = HashMap::new();
     for tx in transactions {
         *fee_counts.entry(tx.priority_fee).or_insert(0) += 1;
     }
