@@ -1,8 +1,6 @@
 use crate::oracle::*;
 use crate::types::*;
-use reqwest;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use once_cell::sync::Lazy;
